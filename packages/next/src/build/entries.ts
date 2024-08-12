@@ -66,7 +66,7 @@ import {
 } from '../lib/is-internal-component'
 import {
   isMetadataRoute,
-  isStaticMetadataRouteFile,
+  isStaticMetadataRoute,
 } from '../lib/metadata/is-metadata-route'
 import { RouteKind } from '../server/route-kind'
 import { encodeToBase64 } from './webpack/loaders/utils'
@@ -105,6 +105,7 @@ export async function getStaticInfoIncludingLayouts({
   config,
   isDev,
   page,
+  originalAppPath,
 }: {
   isInsideAppDir: boolean
   pageExtensions: PageExtensions
@@ -113,71 +114,89 @@ export async function getStaticInfoIncludingLayouts({
   config: NextConfigComplete
   isDev: boolean | undefined
   page: string
+  originalAppPath?: string
 }): Promise<PageStaticInfo> {
   const pageStaticInfo = await getPageStaticInfo({
     nextConfig: config,
     pageFilePath,
     isDev,
     page,
+    // TODO: sync types for pages: PAGE_TYPES, ROUTE_TYPES, 'app' | 'pages', etc.
     pageType: isInsideAppDir ? PAGE_TYPES.APP : PAGE_TYPES.PAGES,
   })
 
-  const staticInfo: PageStaticInfo = isInsideAppDir
-    ? {
-        // TODO-APP: Remove the rsc key altogether. It's no longer required.
-        rsc: 'server',
+  if (!isInsideAppDir || !appDir) {
+    return pageStaticInfo
+  }
+
+  // if it's a app route, don't inherit anything from layout
+  if (isAppRouteRoute(originalAppPath || page)) {
+    return pageStaticInfo
+  }
+
+  // if it's static metadata route, don't inherit runtime from layout
+  if (isStaticMetadataRoute(page)) {
+    return pageStaticInfo
+  }
+
+  const staticInfo: PageStaticInfo = {
+    // TODO-APP: Remove the rsc key altogether. It's no longer required.
+    rsc: 'server',
+  }
+
+  const layoutFiles = []
+  const potentialLayoutFiles = pageExtensions.map((ext) => 'layout.' + ext)
+  let dir = dirname(pageFilePath)
+  // Uses startsWith to not include directories further up.
+  while (dir.startsWith(appDir)) {
+    for (const potentialLayoutFile of potentialLayoutFiles) {
+      const layoutFile = join(dir, potentialLayoutFile)
+      if (!fs.existsSync(layoutFile)) {
+        continue
       }
-    : pageStaticInfo
+      layoutFiles.unshift(layoutFile)
+    }
+    // Walk up the directory tree
+    dir = join(dir, '..')
+  }
 
-  if (isInsideAppDir && appDir) {
-    const layoutFiles = []
-    const potentialLayoutFiles = pageExtensions.map((ext) => 'layout.' + ext)
-    let dir = dirname(pageFilePath)
-    // Uses startsWith to not include directories further up.
-    while (dir.startsWith(appDir)) {
-      for (const potentialLayoutFile of potentialLayoutFiles) {
-        const layoutFile = join(dir, potentialLayoutFile)
-        if (!fs.existsSync(layoutFile)) {
-          continue
-        }
-        layoutFiles.unshift(layoutFile)
+  for (const layoutFile of layoutFiles) {
+    const layoutStaticInfo = await getPageStaticInfo({
+      nextConfig: config,
+      pageFilePath: layoutFile,
+      isDev,
+      page,
+      pageType: isInsideAppDir ? PAGE_TYPES.APP : PAGE_TYPES.PAGES,
+    })
+
+    // Only runtime is relevant here.
+    if (layoutStaticInfo.runtime) {
+      staticInfo.runtime = layoutStaticInfo.runtime
+    }
+    if (layoutStaticInfo.preferredRegion) {
+      staticInfo.preferredRegion = layoutStaticInfo.preferredRegion
+    }
+    if (layoutStaticInfo.extraConfig) {
+      staticInfo.extraConfig = {
+        ...staticInfo.extraConfig,
+        ...layoutStaticInfo.extraConfig,
       }
-      // Walk up the directory tree
-      dir = join(dir, '..')
-    }
-
-    for (const layoutFile of layoutFiles) {
-      const layoutStaticInfo = await getPageStaticInfo({
-        nextConfig: config,
-        pageFilePath: layoutFile,
-        isDev,
-        page,
-        pageType: isInsideAppDir ? PAGE_TYPES.APP : PAGE_TYPES.PAGES,
-      })
-
-      // Only runtime is relevant here.
-      if (layoutStaticInfo.runtime) {
-        staticInfo.runtime = layoutStaticInfo.runtime
-      }
-      if (layoutStaticInfo.preferredRegion) {
-        staticInfo.preferredRegion = layoutStaticInfo.preferredRegion
-      }
-    }
-
-    if (pageStaticInfo.runtime) {
-      staticInfo.runtime = pageStaticInfo.runtime
-    }
-    if (pageStaticInfo.preferredRegion) {
-      staticInfo.preferredRegion = pageStaticInfo.preferredRegion
-    }
-
-    // if it's static metadata route, don't inherit runtime from layout
-    const relativePath = pageFilePath.replace(appDir, '')
-    if (isStaticMetadataRouteFile(relativePath)) {
-      delete staticInfo.runtime
-      delete staticInfo.preferredRegion
     }
   }
+
+  if (pageStaticInfo.runtime) {
+    staticInfo.runtime = pageStaticInfo.runtime
+  }
+  if (pageStaticInfo.preferredRegion) {
+    staticInfo.preferredRegion = pageStaticInfo.preferredRegion
+  }
+  if (pageStaticInfo.extraConfig) {
+    staticInfo.extraConfig = {
+      ...staticInfo.extraConfig,
+      ...pageStaticInfo.extraConfig,
+    }
+  }
+
   return staticInfo
 }
 
